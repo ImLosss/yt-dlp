@@ -294,9 +294,23 @@ class WeTvBaseIE(TencentBaseIE):
     _REFERER = 'wetv.vip'
 
     def _get_webpage_metadata(self, webpage, video_id):
-        return self._parse_json(
-            traverse_obj(self._search_nextjs_data(webpage, video_id), ('props', 'pageProps', 'data')),
-            video_id, fatal=False)
+        next_data = self._search_nextjs_data(webpage, video_id, default=None)
+        metadata = None
+        if next_data:
+            page_data = traverse_obj(next_data, ('props', 'pageProps', 'data'))
+            if page_data:
+                metadata = self._parse_json(page_data, video_id, fatal=False)
+        if not metadata:
+            v13_data = self._search_nextjs_v13_data(webpage, video_id, fatal=False)
+            for v in v13_data.values():
+                if isinstance(v, dict) and ('album' in v or 'video' in v):
+                    metadata = {
+                        'coverInfo': v.get('album'),
+                        'videoInfo': v.get('video'),
+                        'videoList': v.get('episodes'),
+                    }
+                    break
+        return metadata or {}
 
     def _extract_episode(self, url):
         video_id, series_id = self._match_valid_url(url).group('id', 'series_id')
