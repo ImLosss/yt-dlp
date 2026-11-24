@@ -11,6 +11,7 @@ from ..utils import (
     float_or_none,
     int_or_none,
     js_to_json,
+    orderedSet,
     traverse_obj,
     urljoin,
 )
@@ -148,7 +149,7 @@ class TencentBaseIE(InfoExtractor):
 
     def _get_clean_title(self, title):
         return re.sub(
-            r'\s*[_\-]\s*(?:Watch online|Watch HD Video Online|WeTV|腾讯视频|(?:高清)?1080P在线观看平台).*?$',
+            r'\s*[|_\-]\s*(?:Watch online|Watch HD Video Online|WeTV|腾讯视频|(?:高清)?1080P在线观看平台).*?$',
             '', title or '').strip() or None
 
 
@@ -321,7 +322,7 @@ class WeTvBaseIE(TencentBaseIE):
         return {
             'id': video_id,
             'title': self._get_clean_title(self._og_search_title(webpage)
-                                           or traverse_obj(webpage_metadata, ('coverInfo', 'title'))),
+                                           or traverse_obj(webpage_metadata, ('videoInfo', 'title'), ('coverInfo', 'title'))),
             'description': (traverse_obj(webpage_metadata, ('coverInfo', 'description'))
                             or self._og_search_description(webpage)),
             'formats': formats,
@@ -337,8 +338,23 @@ class WeTvBaseIE(TencentBaseIE):
         webpage = self._download_webpage(url, series_id)
         webpage_metadata = self._get_webpage_metadata(webpage, series_id)
 
-        episode_paths = ([f'/play/{series_id}/{episode["vid"]}' for episode in webpage_metadata.get('videoList')]
-                         or re.findall(r'<a[^>]+class="play-video__link"[^>]+href="(?P<path>[^"]+)', webpage))
+        episode_ids = traverse_obj(webpage_metadata, ('videoList', ..., ('vid', 'id'), {str}))
+        if not episode_ids:
+            country_ids = traverse_obj(webpage_metadata, ('coverInfo', 'video_ids_country', {str}))
+            if country_ids:
+                episode_ids = [ep_id.strip() for ep_id in country_ids.split(',') if ep_id.strip()]
+        if not episode_ids:
+            vid = traverse_obj(webpage_metadata, ('videoInfo', ('vid', 'id'), {str}))
+            if vid:
+                episode_ids = [vid]
+
+        episode_paths = [f'/play/{series_id}/{ep_id}' for ep_id in episode_ids] if episode_ids else (
+            re.findall(r'<a[^>]+class="play-video__link"[^>]+href="(?P<path>[^"]+)', webpage)
+            or re.findall(rf'href=["\']([^"\']*/play/{re.escape(series_id)}/[^"\'?#]+)', webpage))
+
+        episode_paths = list(orderedSet(episode_paths))
+        if len(episode_paths) == 1:
+            return self.url_result(urljoin(url, episode_paths[0]), ie=ie)
 
         return self.playlist_from_matches(
             episode_paths, series_id, ie=ie, getter=urljoin(url),
