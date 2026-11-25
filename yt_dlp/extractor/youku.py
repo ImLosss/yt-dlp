@@ -2,12 +2,14 @@ import random
 import re
 import string
 import time
+import urllib.parse
 
 from .common import InfoExtractor
 from ..utils import (
     ExtractorError,
     clean_html,
     get_element_by_class,
+    int_or_none,
     js_to_json,
     str_or_none,
     strip_jsonp,
@@ -21,9 +23,10 @@ class YoukuIE(InfoExtractor):
         (?:
             https?://(
                 (?:v|play(?:er)?)\.(?:youku|tudou)\.com/(?:v_show/id_|player\.php/sid/)|
+                (?:www\.)?youku\.tv/v/v_show/id_|
                 video\.tudou\.com/v/)|
             youku:)
-        (?P<id>[A-Za-z0-9]+)(?:\.html|/v\.swf|)
+        (?P<id>[A-Za-z0-9_-]+)(?:={0,2})(?:\.html|/v\.swf|)
     '''
 
     _TESTS = [{
@@ -35,7 +38,7 @@ class YoukuIE(InfoExtractor):
         'info_dict': {
             'id': 'XNjA1NzA2Njgw',
             'ext': 'mp4',
-            'title': '邢義田复旦讲座之想象中的胡人—从“左衽孔子”说起',
+            'title': '邢義田复旦讲座之想象中的胡人—从"左衽孔子"说起',
             'duration': 7264.5,
             'thumbnail': r're:^https?://.*',
             'uploader': 'FoxJin1006',
@@ -100,6 +103,9 @@ class YoukuIE(InfoExtractor):
             'uploader': '英美剧场',
             'duration': 72.91,
         },
+    }, {
+        'url': 'https://www.youku.tv/v/v_show/id_XNjU5NDI1NTMwMA==.html?s=bbea76cc3fa74f789d29&spm=a2hje.13141534.1_2.d_zj2_19&scm=20140719.apircmd.242627.video_XNjU5NDI1NTMwMA==',
+        'only_matching': True,
     }]
 
     @staticmethod
@@ -122,25 +128,79 @@ class YoukuIE(InfoExtractor):
         }
         return _dict.get(fm)
 
+    _LANGUAGE_CODES = {
+        'default': 'zh-Hans',
+        'chs': 'zh-Hans',
+        'cht': 'zh-Hant',
+        'kr': 'ko',
+        'po': 'pt',
+        'jp': 'ja',
+        'vn': 'vi',
+    }
+
+    def _extract_subtitles(self, data):
+        subtitles = {}
+        for sub in data.get('subtitle') or []:
+            sub_url = sub.get('url')
+            if not sub_url:
+                continue
+            lang = sub.get('subtitle_lang') or (sub.get('subtitle_info_code') or ['unknown'])[0]
+            lang = self._LANGUAGE_CODES.get(lang, lang)
+            ext = sub_url.rsplit('.', 1)[-1].split('?')[0].lower()
+            if ext not in ('ass', 'srt', 'vtt'):
+                ext = 'vtt'
+            subtitles.setdefault(lang, []).append({
+                'url': sub_url,
+                'ext': ext,
+                'name': (sub.get('subtitle_info') or [None])[0],
+            })
+        return subtitles
+
     def _real_extract(self, url):
         video_id = self._match_id(url)
+        is_youku_tv = urllib.parse.urlparse(url).netloc.endswith('youku.tv')
 
-        self._set_cookie('youku.com', '__ysuid', self.get_ysuid())
-        self._set_cookie('youku.com', 'xreferrer', 'http://www.youku.com')
+        if is_youku_tv:
+            site = 'youku.tv'
+            ccode = '0597'
+        else:
+            site = 'youku.com'
+            ccode = '0564'
 
-        _, urlh = self._download_webpage_handle(
-            'https://log.mmstat.com/eg.js', video_id, 'Retrieving cna info')
-        # The etag header is '"foobar"'; let's remove the double quotes
-        cna = urlh.headers['etag'][1:-1]
+        self._set_cookie(site, '__ysuid', self.get_ysuid())
+        self._set_cookie(site, 'xreferrer', 'http://www.youku.com')
+
+        # Reuse the cna from the browser (if cookies were provided), since it
+        # belongs to the same session as the login/VIP cookies.
+        cna = self._get_cookies(f'https://www.{site}/').get('cna')
+        cna = cna.value if cna else None
+        if not cna:
+            _, urlh = self._download_webpage_handle(
+                'https://log.mmstat.com/eg.js', video_id, 'Retrieving cna info')
+            # The etag header is '"foobar"'; let's remove the double quotes
+            cna = urlh.headers['etag'][1:-1]
+            self._set_cookie(site, 'cna', cna)
 
         # request basic data
         basic_data_params = {
             'vid': video_id,
-            'ccode': '0564',
+            'ccode': ccode,
             'client_ip': '192.168.1.1',
             'utid': cna,
             'client_ts': time.time() / 1000,
         }
+
+        if is_youku_tv:
+            # Required to get the modern streams and the subtitle list
+            basic_data_params.update({
+                'media_type': 'standard,subtitle',
+                'play_ability': 16782592,
+                'master_m3u8': 1,
+                'drm_type': 3,
+                'key_index': 'web01',
+                'app_ver': '9.8.11',
+                'enc_ver': 2,
+            })
 
         video_password = self.get_param('videopassword')
         if video_password:
@@ -150,10 +210,20 @@ class YoukuIE(InfoExtractor):
             'Referer': url,
         }
         headers.update(self.geo_verification_headers())
+        api_headers = headers
+        if is_youku_tv:
+            # The login/VIP cookies live on youku.tv, but the API host is
+            # ups.youku.com, so the cookie jar would not send them there.
+            tv_cookies = self._get_cookies('https://www.youku.tv/')
+            if tv_cookies:
+                api_headers = {
+                    **headers,
+                    'Cookie': '; '.join(f'{name}={morsel.value}' for name, morsel in tv_cookies.items()),
+                }
         data = self._download_json(
             'https://ups.youku.com/ups/get.json', video_id,
             'Downloading JSON metadata',
-            query=basic_data_params, headers=headers)['data']
+            query=basic_data_params, headers=api_headers)['data']
 
         error = data.get('error')
         if error:
@@ -164,6 +234,10 @@ class YoukuIE(InfoExtractor):
             elif error_note and '该视频被设为私密' in error_note:
                 raise ExtractorError(
                     'Youku said: Sorry, this video is private', expected=True)
+            elif error.get('code') == -6004:
+                raise ExtractorError(
+                    'Youku said: This account has been restricted, please log in again or use a different account',
+                    expected=True)
             else:
                 msg = 'Youku server reported error %i' % error.get('code')
                 if error_note is not None:
@@ -174,20 +248,93 @@ class YoukuIE(InfoExtractor):
         video_data = data['video']
         title = video_data['title']
 
-        formats = [{
-            'url': stream['m3u8_url'],
-            'format_id': self.get_format_name(stream.get('stream_type')),
-            'ext': 'mp4',
-            'protocol': 'm3u8_native',
-            'filesize': int(stream.get('size')),
-            'width': stream.get('width'),
-            'height': stream.get('height'),
-        } for stream in data['stream'] if stream.get('channel_type') != 'tail']
+        def extract_stream_formats(stream):
+            stream_type = stream.get('stream_type')
+            # Youku serves its higher resolutions (e.g. 1080p on youku.tv) as
+            # CENC/CBCS encrypted HLS.  The API labels such streams explicitly;
+            # mark them so they are not offered as normal downloadable formats
+            # (the media is unplayable without a DRM license).  Audio renditions
+            # are served in the clear and remain usable.
+            is_drm = (stream.get('drm_type') or '').lower() in (
+                'cenc', 'cbcs', 'widevine', 'playready', 'fairplay')
+            try:
+                parsed_formats, _ = self._extract_m3u8_formats_and_subtitles(
+                    stream['m3u8_url'], video_id, ext='mp4',
+                    entry_protocol='m3u8_native', m3u8_id=stream_type, headers=headers)
+            except ExtractorError:
+                # Fall back to the raw (master) playlist URL
+                return [{
+                    'url': stream['m3u8_url'],
+                    'format_id': self.get_format_name(stream_type) or stream_type,
+                    'ext': 'mp4',
+                    'protocol': 'm3u8_native',
+                    'filesize': int_or_none(stream.get('size')),
+                    'width': int_or_none(stream.get('width')),
+                    'height': int_or_none(stream.get('height')),
+                    'has_drm': is_drm,
+                    'http_headers': headers,
+                }]
+            for f in parsed_formats:
+                f['http_headers'] = headers
+                if f.get('vcodec') == 'none':
+                    # Separate audio rendition of the master playlist
+                    f['format_id'] = f'{stream_type}-audio'
+                    continue
+                f['format_id'] = self.get_format_name(stream_type) or stream_type
+                f['filesize'] = int_or_none(stream.get('size'))
+                if stream.get('width'):
+                    f['width'] = int_or_none(stream.get('width'))
+                if stream.get('height'):
+                    f['height'] = int_or_none(stream.get('height'))
+                if is_drm:
+                    f['has_drm'] = True
+            return parsed_formats
+
+        formats = []
+        inline_m3u8_streams = []
+        for stream in data.get('stream') or []:
+            if stream.get('channel_type') == 'tail':
+                continue
+            m3u8_url = stream.get('m3u8_url')
+            if not m3u8_url:
+                continue
+            if m3u8_url.startswith('#EXTM3U'):
+                inline_m3u8_streams.append(stream)
+                continue
+            formats.extend(extract_stream_formats(stream))
+
+        # Some streams (e.g. "auto") embed a master m3u8 playlist in m3u8_url
+        if not formats:
+            for stream in inline_m3u8_streams:
+                parsed_formats, _ = self._parse_m3u8_formats_and_subtitles(
+                    stream['m3u8_url'], video_id=video_id, ext='mp4',
+                    entry_protocol='m3u8_native', m3u8_id='hls', headers=headers)
+                formats.extend(parsed_formats)
+
+        # 1080p and above are only offered to clients that advertise DRM
+        # support (the API labels them as CENC, but the samples themselves are
+        # not encrypted, so they can still be downloaded normally).
+        if is_youku_tv and (data.get('vip') or {}).get('hd3'):
+            max_height = max((f.get('height') or 0) for f in formats) or 0
+            if max_height < 1080:
+                hd_data = (self._download_json(
+                    'https://ups.youku.com/ups/get.json', video_id,
+                    'Downloading high quality metadata',
+                    query={**basic_data_params, 'drm_type': 163},
+                    headers=api_headers, fatal=False) or {}).get('data') or {}
+                if not hd_data.get('error'):
+                    for stream in hd_data.get('stream') or []:
+                        height = int_or_none(stream.get('height')) or 0
+                        m3u8_url = stream.get('m3u8_url')
+                        if height <= max_height or not m3u8_url or m3u8_url.startswith('#EXTM3U'):
+                            continue
+                        formats.extend(extract_stream_formats(stream))
 
         return {
             'id': video_id,
             'title': title,
             'formats': formats,
+            'subtitles': self._extract_subtitles(data),
             'duration': video_data.get('seconds'),
             'thumbnail': video_data.get('logo'),
             'uploader': video_data.get('username'),

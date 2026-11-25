@@ -269,10 +269,27 @@ class BilibiliBaseIE(InfoExtractor):
                 f'Subtitles are only available when logged in. {self._login_hint()}', only_once=True)
         for s in traverse_obj(video_info, (
                 'data', 'subtitle', 'subtitles', lambda _, v: v['subtitle_url'] and v['lan'])):
-            subtitles.setdefault(s['lan'], []).append({
-                'ext': 'srt',
-                'data': self.json2srt(self._download_json(s['subtitle_url'], video_id)),
-            })
+            subtitle_url = self._proto_relative_url(s['subtitle_url'], 'https:')
+            note = f'Downloading subtitles for {s["lan"]}'
+            if determine_ext(subtitle_url) == 'ass':
+                # Newer subtitles are served as ASS files, sometimes with a UTF-8 BOM
+                sub_data = self._download_webpage(
+                    subtitle_url, video_id, note=note, errnote='Unable to download subtitles',
+                    fatal=False, encoding='utf-8-sig', headers=self._HEADERS)
+                if sub_data:
+                    subtitles.setdefault(s['lan'], []).append({
+                        'ext': 'ass',
+                        'data': sub_data,
+                    })
+            else:
+                sub_json = self._download_json(
+                    subtitle_url, video_id, note=note, errnote='Unable to download subtitles',
+                    fatal=False, encoding='utf-8-sig', headers=self._HEADERS)
+                if sub_json:
+                    subtitles.setdefault(s['lan'], []).append({
+                        'ext': 'srt',
+                        'data': self.json2srt(sub_json),
+                    })
         return subtitles
 
     def _get_chapters(self, aid, cid):
@@ -369,7 +386,7 @@ class BilibiliBaseIE(InfoExtractor):
 
 
 class BiliBiliIE(BilibiliBaseIE):
-    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/(?:video/|festival/[^/?#]+\?(?:[^#]*&)?bvid=)(?P<prefix>[aAbB][vV])(?P<id>[^/?#&]+)'
+    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/(?:[a-zA-Z]{2}(?:-[a-zA-Z]+)?/)?(?:video/|festival/[^/?#]+\?(?:[^#]*&)?bvid=)(?P<prefix>[aAbB][vV])(?P<id>[^/?#&]+)'
 
     _TESTS = [{
         'url': 'https://www.bilibili.com/video/BV13x41117TL',
@@ -900,7 +917,7 @@ class BiliBiliIE(BilibiliBaseIE):
 
 
 class BiliBiliBangumiIE(BilibiliBaseIE):
-    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/bangumi/play/ep(?P<id>\d+)'
+    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/(?:[a-zA-Z]{2}(?:-[a-zA-Z]+)?/)?bangumi/play/ep(?P<id>\d+)'
 
     _TESTS = [{
         'url': 'https://www.bilibili.com/bangumi/play/ep21495/',
@@ -1084,7 +1101,7 @@ class BiliBiliBangumiIE(BilibiliBaseIE):
 
 
 class BiliBiliBangumiMediaIE(BilibiliBaseIE):
-    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/bangumi/media/md(?P<id>\d+)'
+    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/(?:[a-zA-Z]{2}(?:-[a-zA-Z]+)?/)?bangumi/media/md(?P<id>\d+)'
     _TESTS = [{
         'url': 'https://www.bilibili.com/bangumi/media/md24097891',
         'info_dict': {
@@ -1140,7 +1157,7 @@ class BiliBiliBangumiMediaIE(BilibiliBaseIE):
 
 
 class BiliBiliBangumiSeasonIE(BilibiliBaseIE):
-    _VALID_URL = r'(?x)https?://(?:www\.)?bilibili\.com/bangumi/play/ss(?P<id>\d+)'
+    _VALID_URL = r'(?x)https?://(?:www\.)?bilibili\.com/(?:[a-zA-Z]{2}(?:-[a-zA-Z]+)?/)?bangumi/play/ss(?P<id>\d+)'
     _TESTS = [{
         'url': 'https://www.bilibili.com/bangumi/play/ss26801',
         'info_dict': {
@@ -1241,7 +1258,7 @@ class BilibiliCheeseBaseIE(BilibiliBaseIE):
 
 
 class BilibiliCheeseIE(BilibiliCheeseBaseIE):
-    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/cheese/play/ep(?P<id>\d+)'
+    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/(?:[a-zA-Z]{2}(?:-[a-zA-Z]+)?/)?cheese/play/ep(?P<id>\d+)'
     _TESTS = [{
         'url': 'https://www.bilibili.com/cheese/play/ep229832',
         'info_dict': {
@@ -1268,7 +1285,7 @@ class BilibiliCheeseIE(BilibiliCheeseBaseIE):
 
 
 class BilibiliCheeseSeasonIE(BilibiliCheeseBaseIE):
-    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/cheese/play/ss(?P<id>\d+)'
+    _VALID_URL = r'https?://(?:www\.)?bilibili\.com/(?:[a-zA-Z]{2}(?:-[a-zA-Z]+)?/)?cheese/play/ss(?P<id>\d+)'
     _TESTS = [{
         'url': 'https://www.bilibili.com/cheese/play/ss5918',
         'info_dict': {
