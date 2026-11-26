@@ -612,6 +612,15 @@ def create_parser():
             'Use the specified HTTP/HTTPS/SOCKS proxy. To enable SOCKS proxy, specify a proper scheme, '
             'e.g. socks5://user:pass@127.0.0.1:1080/. Pass in an empty string (--proxy "") for direct connection'))
     network.add_option(
+        '--extractor-proxy', dest='extractor_proxy',
+        default=None, metavar='URL',
+        help=(
+            'Use the specified HTTP/HTTPS/SOCKS proxy only for extraction (webpage and API requests made while '
+            'fetching metadata). The actual media download will still use --proxy, or a direct connection if '
+            '--proxy is not set. '
+            'To enable SOCKS proxy, specify a proper scheme, e.g. socks5://user:pass@127.0.0.1:1080/. '
+            'Pass in an empty string (--extractor-proxy "") for direct connection during extraction'))
+    network.add_option(
         '--socket-timeout',
         dest='socket_timeout', type=float, default=None, metavar='SECONDS',
         help='Time to wait before giving up, in seconds')

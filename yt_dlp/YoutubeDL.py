@@ -651,6 +651,7 @@ class YoutubeDL:
         self._postprocessor_hooks = []
         self._download_retcode = 0
         self._num_downloads = 0
+        self._in_extraction = False
         self._num_videos = 0
         self._playlist_level = 0
         self._playlist_urls = set()
@@ -1859,14 +1860,19 @@ class YoutubeDL:
     def __extract_info(self, url, ie, download, extra_info, process):
         self._apply_header_cookies(url)
 
+        prev_in_extraction = self._in_extraction
+        self._in_extraction = True
         try:
-            ie_result = ie.extract(url)
-        except UserNotLive as e:
-            if process:
-                if self.params.get('wait_for_video'):
-                    self.report_warning(e)
-                self._wait_for_video()
-            raise
+            try:
+                ie_result = ie.extract(url)
+            except UserNotLive as e:
+                if process:
+                    if self.params.get('wait_for_video'):
+                        self.report_warning(e)
+                    self._wait_for_video()
+                raise
+        finally:
+            self._in_extraction = prev_in_extraction
         if ie_result is None:  # Finished already (backwards compatibility; listformats and friends should be moved here)
             self.report_warning(f'Extractor {ie.IE_NAME} returned nothing{bug_reports_message()}')
             return
@@ -4216,6 +4222,16 @@ class YoutubeDL:
         return proxies
 
     @functools.cached_property
+    def extractor_proxies(self):
+        """Proxy configuration used only for requests made during extraction (metadata)"""
+        opts_proxy = self.params.get('extractor_proxy')
+        if opts_proxy is None:
+            return {}
+        if opts_proxy == '':
+            opts_proxy = '__noproxy__'
+        return {'all': opts_proxy}
+
+    @functools.cached_property
     def cookiejar(self):
         """Global cookiejar instance"""
         try:
@@ -4292,6 +4308,10 @@ class YoutubeDL:
         if basic_auth_header:
             req.headers['Authorization'] = basic_auth_header
         req.url = sanitize_url(url)
+
+        if self._in_extraction and self.extractor_proxies:
+            # Explicit per-request proxies take precedence over the extraction proxy
+            req.proxies = {**self.extractor_proxies, **(req.proxies or {})}
 
         clean_proxies(proxies=req.proxies, headers=req.headers)
         clean_headers(req.headers)
