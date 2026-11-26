@@ -127,9 +127,14 @@ class TencentBaseIE(InfoExtractor):
 
         return subtitles
 
+    def _handle_preview_api_response(self, api_response, url, video_id, series_id):
+        return api_response
+
     def _extract_all_video_formats_and_subtitles(self, url, video_id, series_id):
         api_responses = [self._get_video_api_response(url, video_id, series_id, 'srt', 'hls', 'hd')]
         self._check_api_response(api_responses[0])
+        api_responses[0] = self._handle_preview_api_response(
+            api_responses[0], url, video_id, series_id)
         qualities = traverse_obj(api_responses, (0, 'fl', 'fi', ..., 'name')) or ('shd', 'fhd')
         for q in qualities:
             if q not in ('ld', 'sd', 'hd'):
@@ -293,6 +298,73 @@ class WeTvBaseIE(TencentBaseIE):
     _PLATFORM = '4830201'
     _HOST = 'wetv.vip'
     _REFERER = 'wetv.vip'
+    _LOGIN_RENEW_URL = 'https://pbaccess.wetv.vip/trpc_web_login.WebLogin/ReNew'
+    _LOGIN_RENEW_QUERY = {
+        'open_type': '2',
+        'vappid': '50560306',
+        'vsecret': 'f6b675fbb1ec757c3e4486954a06c21299b9ddaedb230ad6',
+        'raw': '1',
+    }
+
+    @staticmethod
+    def _generate_gtk(vusession):
+        token = 5381
+        for char in vusession:
+            token += (token << 5) + ord(char)
+            token &= 0xffffffff
+        return str(token & 0x7fffffff)
+
+    @staticmethod
+    def _is_preview_only(api_response):
+        preview = int_or_none(api_response.get('preview'))
+        duration = float_or_none(traverse_obj(api_response, ('vl', 'vi', 0, 'td')))
+        return preview is not None and duration is not None and 0 < preview < duration - 1
+
+    def _refresh_login_session(self, video_id):
+        if self._HOST != 'wetv.vip':
+            return False
+
+        cookies = self._get_cookies(f'https://{self._HOST}/')
+        vuserid = traverse_obj(cookies, ('vuserid', 'value'))
+        vutoken = traverse_obj(cookies, ('vutoken', 'value'))
+        if not vuserid or not vutoken:
+            return False
+
+        self._download_webpage(
+            self._LOGIN_RENEW_URL, video_id, note='Refreshing WeTV login session',
+            headers={'Origin': 'https://wetv.vip', 'Referer': 'https://wetv.vip/'},
+            query={
+                **self._LOGIN_RENEW_QUERY,
+                'vplatform': traverse_obj(cookies, ('vplatform', 'value')) or '2',
+                'video_appid': traverse_obj(cookies, ('video_appid', 'value')) or '1200004',
+                'g_vstk': self._generate_gtk(traverse_obj(cookies, ('vusession', 'value')) or ''),
+                'guid': traverse_obj(cookies, (('video_guid', 'guid'), 'value'), get_all=False) or '',
+            },
+            fatal=False, errnote=False)
+
+        return bool(traverse_obj(self._get_cookies(f'https://{self._HOST}/'), ('vusession', 'value')))
+
+    def _handle_preview_api_response(self, api_response, url, video_id, series_id):
+        if self._HOST != 'wetv.vip' or not self._is_preview_only(api_response):
+            return api_response
+
+        if self._refresh_login_session(video_id):
+            refreshed_response = self._get_video_api_response(
+                url, video_id, series_id, 'srt', 'hls', 'hd')
+            self._check_api_response(refreshed_response)
+            api_response = refreshed_response
+
+        if self._is_preview_only(api_response):
+            preview = int_or_none(api_response.get('preview'))
+            duration = float_or_none(traverse_obj(api_response, ('vl', 'vi', 0, 'td')))
+            msg = f'Only a {preview}-second preview of the {duration:.0f}-second video is available'
+            if api_response.get('login'):
+                msg += ' to this account (VIP subscription required)'
+            else:
+                msg += ' because the login session has expired and could not be refreshed'
+            self.raise_login_required(msg, method='cookies')
+
+        return api_response
 
     def _get_webpage_metadata(self, webpage, video_id):
         next_data = self._search_nextjs_data(webpage, video_id, default=None)
