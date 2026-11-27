@@ -201,6 +201,14 @@ class YoukuIE(InfoExtractor):
                 'app_ver': '9.8.11',
                 'enc_ver': 2,
             })
+            # Videos that belong to a show/season require the show id, otherwise
+            # the API rejects the request with a misleading "please log in"
+            # error (-3007).  It is passed in the URL as the `s` parameter
+            # (and is also exposed as `showId` on the page).
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            show_id = (query.get('s') or query.get('showid') or [None])[0]
+            if show_id and re.fullmatch(r'[0-9a-fA-F]{16,32}', show_id):
+                basic_data_params['showid'] = show_id
 
         video_password = self.get_param('videopassword')
         if video_password:
@@ -220,12 +228,27 @@ class YoukuIE(InfoExtractor):
                     **headers,
                     'Cookie': '; '.join(f'{name}={morsel.value}' for name, morsel in tv_cookies.items()),
                 }
-        data = self._download_json(
-            'https://ups.youku.com/ups/get.json', video_id,
-            'Downloading JSON metadata',
-            query=basic_data_params, headers=api_headers)['data']
+        def download_data(params):
+            return self._download_json(
+                'https://ups.youku.com/ups/get.json', video_id,
+                'Downloading JSON metadata',
+                query=params, headers=api_headers)['data']
+
+        data = download_data(basic_data_params)
 
         error = data.get('error')
+        if is_youku_tv and error and error.get('code') == -3007:
+            # Fallback for URLs whose `s` parameter is missing or is not the
+            # show id: the video page contains the show id needed to access
+            # show/season videos.
+            webpage = self._download_webpage(url, video_id, 'Downloading video page', fatal=False) or ''
+            show_id = self._search_regex(
+                r'"showId"\s*:\s*"([0-9a-zA-Z_-]+)"', webpage, 'show id', default=None)
+            if show_id and show_id != basic_data_params.get('showid'):
+                basic_data_params['showid'] = show_id
+                data = download_data(basic_data_params)
+                error = data.get('error')
+
         if error:
             error_note = error.get('note')
             if error_note is not None and '因版权原因无法观看此视频' in error_note:
@@ -311,10 +334,12 @@ class YoukuIE(InfoExtractor):
                     entry_protocol='m3u8_native', m3u8_id='hls', headers=headers)
                 formats.extend(parsed_formats)
 
-        # 1080p and above are only offered to clients that advertise DRM
-        # support (the API labels them as CENC, but the samples themselves are
-        # not encrypted, so they can still be downloaded normally).
-        if is_youku_tv and (data.get('vip') or {}).get('hd3'):
+        # 1080p and above are only offered when the client advertises DRM
+        # support.  Depending on the video, the API may return them either as
+        # clear ("default") streams or as CENC/CBCS encrypted streams.  Ask for
+        # them even without a recognised VIP session: some videos (and some
+        # API backends) serve a clear 1080p stream to anonymous clients.
+        if is_youku_tv:
             max_height = max((f.get('height') or 0) for f in formats) or 0
             if max_height < 1080:
                 hd_data = (self._download_json(
