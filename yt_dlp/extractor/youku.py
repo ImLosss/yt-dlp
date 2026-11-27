@@ -201,14 +201,16 @@ class YoukuIE(InfoExtractor):
                 'app_ver': '9.8.11',
                 'enc_ver': 2,
             })
-            # Videos that belong to a show/season require the show id, otherwise
-            # the API rejects the request with a misleading "please log in"
-            # error (-3007).  It is passed in the URL as the `s` parameter
-            # (and is also exposed as `showId` on the page).
+            # The `s` query parameter (also exposed as `showId` on the page) is
+            # the *show* id, not the episode id.  Do not send it as `showid`
+            # together with `vid`: when both are present Youku ignores `vid`
+            # and returns the show's current episode instead, which is how the
+            # extractor used to return the wrong episode.  Only use it as a
+            # fallback for the misleading "please log in" error (-3007).
             query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             show_id = (query.get('s') or query.get('showid') or [None])[0]
-            if show_id and re.fullmatch(r'[0-9a-fA-F]{16,32}', show_id):
-                basic_data_params['showid'] = show_id
+            if not (show_id and re.fullmatch(r'[0-9a-fA-F]{16,32}', show_id)):
+                show_id = None
 
         video_password = self.get_param('videopassword')
         if video_password:
@@ -228,6 +230,7 @@ class YoukuIE(InfoExtractor):
                     **headers,
                     'Cookie': '; '.join(f'{name}={morsel.value}' for name, morsel in tv_cookies.items()),
                 }
+
         def download_data(params):
             return self._download_json(
                 'https://ups.youku.com/ups/get.json', video_id,
@@ -235,19 +238,35 @@ class YoukuIE(InfoExtractor):
                 query=params, headers=api_headers)['data']
 
         data = download_data(basic_data_params)
-
         error = data.get('error')
+
+        def is_requested_video(data):
+            encodeid = (data.get('video') or {}).get('encodeid') or ''
+            return encodeid.rstrip('=') == video_id.rstrip('=')
+
         if is_youku_tv and error and error.get('code') == -3007:
             # Fallback for URLs whose `s` parameter is missing or is not the
             # show id: the video page contains the show id needed to access
             # show/season videos.
             webpage = self._download_webpage(url, video_id, 'Downloading video page', fatal=False) or ''
-            show_id = self._search_regex(
+            page_show_id = self._search_regex(
                 r'"showId"\s*:\s*"([0-9a-zA-Z_-]+)"', webpage, 'show id', default=None)
-            if show_id and show_id != basic_data_params.get('showid'):
+            show_id = page_show_id or show_id
+            if show_id:
                 basic_data_params['showid'] = show_id
                 data = download_data(basic_data_params)
                 error = data.get('error')
+                if not error and not is_requested_video(data):
+                    # `showid` made Youku return a different episode of the
+                    # show; never silently accept it.
+                    basic_data_params.pop('showid', None)
+                    data = download_data(basic_data_params)
+                    error = data.get('error')
+
+        if not error and is_youku_tv and not is_requested_video(data):
+            raise ExtractorError(
+                'Youku returned the wrong video (%s) instead of the requested one (%s)'
+                % ((data.get('video') or {}).get('encodeid'), video_id))
 
         if error:
             error_note = error.get('note')
