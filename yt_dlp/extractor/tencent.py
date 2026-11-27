@@ -5,6 +5,7 @@ import time
 
 from .common import InfoExtractor
 from ..aes import aes_cbc_encrypt_bytes
+from ..networking.exceptions import TransportError
 from ..utils import (
     ExtractorError,
     determine_ext,
@@ -19,6 +20,20 @@ from ..utils import (
 
 class TencentBaseIE(InfoExtractor):
     """Subclasses must set _API_URL, _APP_VERSION, _PLATFORM, _HOST, _REFERER"""
+
+    def _download_webpage_with_retry(self, url_or_request, video_id, *args, **kwargs):
+        impersonate = kwargs.pop('impersonate', None)
+        for retry in self.RetryManager():
+            try:
+                return self._download_webpage(
+                    url_or_request, video_id, *args, impersonate=impersonate, **kwargs)
+            except ExtractorError as e:
+                if not isinstance(e.cause, TransportError):
+                    raise
+                retry.error = e
+                # urllib can truncate chunked responses through some proxies.
+                # Retry with an impersonation-capable handler (e.g. curl_cffi) if available.
+                impersonate = True
 
     def _check_api_response(self, api_response):
         msg = api_response.get('msg')
@@ -74,7 +89,7 @@ class TencentBaseIE(InfoExtractor):
             'flowid': ''.join(random.choices(string.digits + string.ascii_lowercase, k=32)),
         }
 
-        return self._search_json(r'QZOutputJson=', self._download_webpage(
+        return self._search_json(r'QZOutputJson=', self._download_webpage_with_retry(
             self._API_URL, video_id, query=query), 'api_response', video_id)
 
     def _extract_video_formats_and_subtitles(self, api_response, video_id):
@@ -233,7 +248,7 @@ class VQQVideoIE(VQQBaseIE):
 
     def _real_extract(self, url):
         video_id, series_id = self._match_valid_url(url).group('id', 'series_id')
-        webpage = self._download_webpage(url, video_id)
+        webpage = self._download_webpage_with_retry(url, video_id)
         webpage_metadata = self._get_webpage_metadata(webpage, video_id)
 
         formats, subtitles = self._extract_all_video_formats_and_subtitles(url, video_id, series_id)
@@ -275,7 +290,7 @@ class VQQSeriesIE(VQQBaseIE):
 
     def _real_extract(self, url):
         series_id = self._match_id(url)
-        webpage = self._download_webpage(url, series_id)
+        webpage = self._download_webpage_with_retry(url, series_id)
         webpage_metadata = self._get_webpage_metadata(webpage, series_id)
 
         episode_paths = [f'/x/cover/{series_id}/{video_id}.html' for video_id in re.findall(
@@ -330,7 +345,7 @@ class WeTvBaseIE(TencentBaseIE):
         if not vuserid or not vutoken:
             return False
 
-        self._download_webpage(
+        self._download_webpage_with_retry(
             self._LOGIN_RENEW_URL, video_id, note='Refreshing WeTV login session',
             headers={'Origin': 'https://wetv.vip', 'Referer': 'https://wetv.vip/'},
             query={
@@ -387,7 +402,7 @@ class WeTvBaseIE(TencentBaseIE):
 
     def _extract_episode(self, url):
         video_id, series_id = self._match_valid_url(url).group('id', 'series_id')
-        webpage = self._download_webpage(url, video_id)
+        webpage = self._download_webpage_with_retry(url, video_id)
         webpage_metadata = self._get_webpage_metadata(webpage, video_id)
 
         formats, subtitles = self._extract_all_video_formats_and_subtitles(url, video_id, series_id)
@@ -407,7 +422,7 @@ class WeTvBaseIE(TencentBaseIE):
 
     def _extract_series(self, url, ie):
         series_id = self._match_id(url)
-        webpage = self._download_webpage(url, series_id)
+        webpage = self._download_webpage_with_retry(url, series_id)
         webpage_metadata = self._get_webpage_metadata(webpage, series_id)
 
         episode_ids = traverse_obj(webpage_metadata, ('videoList', ..., ('vid', 'id'), {str}))
