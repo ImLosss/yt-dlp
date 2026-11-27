@@ -295,8 +295,8 @@ class YoukuIE(InfoExtractor):
             # Youku serves its higher resolutions (e.g. 1080p on youku.tv) as
             # CENC/CBCS encrypted HLS.  The API labels such streams explicitly;
             # mark them so they are not offered as normal downloadable formats
-            # (the media is unplayable without a DRM license).  Audio renditions
-            # are served in the clear and remain usable.
+            # (the media is unplayable without a DRM license).  When the video
+            # is encrypted, its audio rendition is encrypted as well.
             is_drm = (stream.get('drm_type') or '').lower() in (
                 'cenc', 'cbcs', 'widevine', 'playready', 'fairplay')
             try:
@@ -321,6 +321,7 @@ class YoukuIE(InfoExtractor):
                 if f.get('vcodec') == 'none':
                     # Separate audio rendition of the master playlist
                     f['format_id'] = f'{stream_type}-audio'
+                    f['has_drm'] = is_drm
                     continue
                 f['format_id'] = self.get_format_name(stream_type) or stream_type
                 f['filesize'] = int_or_none(stream.get('size'))
@@ -373,6 +374,35 @@ class YoukuIE(InfoExtractor):
                         if height <= max_height or not m3u8_url or m3u8_url.startswith('#EXTM3U'):
                             continue
                         formats.extend(extract_stream_formats(stream))
+
+        # Some episodes have multiple audio languages.  Youku often marks the
+        # original Mandarin track as an alternate rendition (DEFAULT=NO /
+        # AUTOSELECT=NO), which makes yt-dlp prefer a dub (e.g. Vietnamese) for
+        # `bestaudio`.  Explicitly prefer Mandarin (guoyu), then its
+        # higher-quality clear rendition (cmfa1hd).
+        if is_youku_tv:
+            mandarin_languages = {'guoyu', 'zh', 'zh-hans', 'zh-hant', 'cmn', 'mandarin'}
+            audio_quality = {
+                'cmfv4hd3': 3,
+                'cmfv4hd2': 2,
+                'cmfv4hd': 1,
+                'cmfv4sd': 0,
+            }
+            for f in formats:
+                if f.get('vcodec') != 'none':
+                    continue
+                language = (f.get('language') or '').lower()
+                if language in mandarin_languages:
+                    f['language_preference'] = 10
+                    if not f.get('has_drm'):
+                        stream_type = urllib.parse.parse_qs(
+                            urllib.parse.urlparse(f.get('url') or '').query).get('type', [None])[0]
+                        if stream_type in audio_quality:
+                            f['quality'] = audio_quality[stream_type]
+                elif language == 'default':
+                    # `default` is normally the original audio, but keep it below
+                    # an explicitly tagged Mandarin track.
+                    f['language_preference'] = 5
 
         return {
             'id': video_id,
