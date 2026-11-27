@@ -23,7 +23,7 @@ class YoukuIE(InfoExtractor):
         (?:
             https?://(
                 (?:v|play(?:er)?)\.(?:youku|tudou)\.com/(?:v_show/id_|player\.php/sid/)|
-                (?:www\.)?youku\.tv/v/v_show/id_|
+                (?:www\.)?youku\.tv/(?:v/)?v_show/id_|
                 video\.tudou\.com/v/)|
             youku:)
         (?P<id>[A-Za-z0-9_-]+)(?:={0,2})(?:\.html|/v\.swf|)
